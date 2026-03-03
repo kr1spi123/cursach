@@ -5,6 +5,16 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { config } from "./config.js";
 import { faqCategories } from "./faqData.js";
+import { 
+  initDb, 
+  migrateFaqData, 
+  saveUser, 
+  toggleFavorite, 
+  getFavorites, 
+  isFavorite, 
+  incrementQuestionStat, 
+  getTopQuestions as getTopQuestionsDb 
+} from "./database.js";
 
 if (!config.token) {
   console.error("TELEGRAM_TOKEN отсутствует в окружении/.env");
@@ -12,13 +22,11 @@ if (!config.token) {
 }
 
 const faqQuestionsMap = new Map();
-const faqStats = new Map();
 let algoliaIndex = null;
 let algoliaReady = false;
 
 function indexFaq() {
   faqQuestionsMap.clear();
-  faqStats.clear();
   for (const category of faqCategories) {
     for (const item of category.items) {
       faqQuestionsMap.set(item.id, {
@@ -26,7 +34,6 @@ function indexFaq() {
         categoryId: category.id,
         categoryTitle: category.title,
       });
-      faqStats.set(item.id, 0);
     }
   }
 }
@@ -62,25 +69,6 @@ async function indexAlgolia() {
   }
 }
 
-function incrementStat(questionId) {
-  if (!faqStats.has(questionId)) {
-    faqStats.set(questionId, 0);
-  }
-  faqStats.set(questionId, faqStats.get(questionId) + 1);
-}
-
-function getTopQuestions(limit = 5) {
-  const entries = Array.from(faqStats.entries());
-  entries.sort((a, b) => b[1] - a[1]);
-  const top = entries.slice(0, limit).filter(([, count]) => count > 0);
-  return top
-    .map(([id, count]) => {
-      const question = faqQuestionsMap.get(id);
-      return { question, count };
-    })
-    .filter((x) => x.question);
-}
-
 async function searchAlgoliaFaq(query, limit = 5) {
   if (!algoliaReady || !algoliaIndex) {
     return [];
@@ -108,7 +96,6 @@ function initialSession() {
     awaitingSearch: false,
     lastSearchQuery: "",
     lastCategoryId: null,
-    favorites: [],
     recentQuestions: [],
     totalQuestionsViewed: 0,
     totalSearches: 0,
@@ -118,8 +105,20 @@ function initialSession() {
 const bot = new Bot(config.token);
 bot.use(session({ initial: initialSession }));
 
+// Middleware для сохранения пользователя в БД при любом взаимодействии
+bot.use(async (ctx, next) => {
+  if (ctx.from) {
+    saveUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
+  }
+  return await next();
+});
+
 (async () => {
   try {
+    // Инициализация БД
+    initDb();
+    migrateFaqData(faqCategories);
+
     await indexAlgolia();
     await bot.api.setMyCommands([
       { command: "start", description: "Главное меню" },
@@ -300,33 +299,31 @@ function commandsHelpText() {
 
 bot.command("start", async (ctx) => {
   const text = [
-    `👋 Добро пожаловать в информационный бот ${config.institutionName}.`,
+    `👋 Вас приветствует официальный информационный бот ГАПОУ «Сыктывкарский лесопромышленный техникум».`,
     "",
-    "Здесь вы можете быстро найти ответы на типовые вопросы:",
-    "• Поступление и документы",
-    "• Сроки приёмной кампании",
-    "• Расписание и обучение",
-    "• Контакты и приёмная комиссия",
+    "Я помогу вам быстро получить ответы на вопросы о поступлении, специальностях и студенческой жизни в СЛТ.",
     "",
+    "<b>Основные разделы:</b>",
+    "• Правила приема и документы",
+    "• Сроки подачи заявлений",
+    "• Перечень специальностей 2025",
+    "• Общежитие и стипендии",
     "",
-    "Нажмите кнопку ниже или введите вопрос текстом.",
+    "Выберите нужный раздел в меню или просто напишите свой вопрос в чат.",
   ].join("\n");
   await sendMenuPhoto(ctx, "home", text, startKeyboard());
 });
 
 bot.command("help", async (ctx) => {
   const text = [
-    "❓ Помощь",
+    "❓ <b>Справка по использованию бота СЛТ</b>",
     "",
-    "1) Нажмите «Вопросы по категориям», чтобы выбрать раздел.",
-    "2) Используйте «Поиск по вопросу», чтобы написать свой вопрос текстом.",
-    "3) В разделе «Популярные вопросы» отображаются самые часто задаваемые вопросы.",
+    "1) <b>Категории:</b> Нажмите «Вопросы по категориям», чтобы выбрать интересующий вас раздел (например, «Специальности» или «Общежитие»).",
+    "2) <b>Поиск:</b> Нажмите «Поиск по вопросу» и введите свой запрос текстом (например, <i>«как подать документы?»</i>).",
+    "3) <b>Избранное:</b> Сохраняйте важные ответы, нажимая кнопку ⭐ под сообщением.",
     "",
-    "Доступные команды:",
-    "/start — главное меню.",
-    "/help — эта справка.",
-    "",
-    "Если вы не нашли нужный ответ, попробуйте переформулировать вопрос или выбрать другую категорию.",
+    "<b>Техническая поддержка:</b>",
+    "Если вы не нашли ответ, обратитесь в приёмную комиссию СЛТ по телефону 8(8212) 62-50-53.",
   ].join("\n");
   await sendMenuPhoto(ctx, "help", text, backHomeKeyboard());
 });
@@ -358,8 +355,17 @@ bot.callbackQuery("commands", async (ctx) => {
 });
 
 bot.callbackQuery("about", async (ctx) => {
-  const text =
-    "ℹ️ О боте\nЭтот бот помогает абитуриентам и студентам быстро находить ответы на типовые вопросы по колледжу. База вопросов может дополняться и обновляться администрацией.";
+  const text = [
+    "ℹ️ <b>О ГАПОУ «СЛТ»</b>",
+    "",
+    "Сыктывкарский лесопромышленный техникум — одно из старейших учебных заведений Республики Коми, готовящее квалифицированные кадры для лесной отрасли, ИТ-индустрии и сферы обслуживания.",
+    "",
+    "📍 <b>Адрес:</b> г. Сыктывкар, ул. Менделеева, д. 2/1",
+    "📞 <b>Телефон:</b> 8(8212) 62-50-53",
+    "🌐 <b>Сайт:</b> <a href='https://slt-online.ru'>slt-online.ru</a>",
+    "",
+    "Бот разработан для оперативной поддержки абитуриентов и студентов.",
+  ].join("\n");
   await sendMenuPhoto(ctx, "about", text, backHomeKeyboard());
 });
 
@@ -391,7 +397,10 @@ bot.callbackQuery(/^faq_\d+$/, async (ctx) => {
     await ctx.reply("Вопрос не найден. Попробуйте снова.");
     return;
   }
-  incrementStat(id);
+  
+  // Обновляем статистику в БД
+  incrementQuestionStat(id);
+  
   const s = ctx.session;
   s.totalQuestionsViewed += 1;
   if (!s.recentQuestions.includes(id)) {
@@ -400,9 +409,12 @@ bot.callbackQuery(/^faq_\d+$/, async (ctx) => {
       s.recentQuestions = s.recentQuestions.slice(0, 10);
     }
   }
-  const isFavorite = s.favorites.includes(id);
+  
+  // Проверяем избранное в БД
+  const isFav = isFavorite(ctx.from.id, id);
+  
   const kb = new InlineKeyboard()
-    .text(isFavorite ? "⭐ Убрать из избранного" : "⭐ В избранное", `fav_toggle_${id}`).row()
+    .text(isFav ? "⭐ Убрать из избранного" : "⭐ В избранное", `fav_toggle_${id}`).row()
     .text("⬅️ К вопросам раздела", `cat_${item.categoryId}`).row()
     .text("🏠 Главное меню", "start");
   await sendMenuPhoto(ctx, "categories", formatFaqAnswer(item), kb);
@@ -418,15 +430,15 @@ bot.callbackQuery("search", async (ctx) => {
 });
 
 bot.callbackQuery("stats", async (ctx) => {
-  const top = getTopQuestions(5);
+  const top = getTopQuestionsDb(5);
   if (!top.length) {
     const kb = backHomeKeyboard();
     await sendMenuPhoto(ctx, "stats", "Пока статистика пуста. Задайте несколько вопросов через бот.", kb);
     return;
   }
   const lines = ["📊 Популярные вопросы:"];
-  for (const { question, count } of top) {
-    lines.push(`• ${question.question} (запросов: ${count})`);
+  for (const item of top) {
+    lines.push(`• ${item.question} (запросов: ${item.view_count})`);
   }
   const kb = new InlineKeyboard().text("📚 К категориям", "categories").row().text("🏠 Главное меню", "start");
   await sendMenuPhoto(ctx, "stats", lines.join("\n"), kb);
@@ -440,29 +452,36 @@ bot.callbackQuery(/^fav_toggle_\d+$/, async (ctx) => {
     await ctx.reply("Не удалось обновить избранное. Попробуйте позже.");
     return;
   }
-  const s = ctx.session;
-  if (!Array.isArray(s.favorites)) {
-    s.favorites = [];
-  }
-  if (s.favorites.includes(id)) {
-    s.favorites = s.favorites.filter((x) => x !== id);
-    await ctx.answerCallbackQuery({ text: "Удалено из избранного" });
-  } else {
-    s.favorites.push(id);
-    await ctx.answerCallbackQuery({ text: "Добавлено в избранное" });
-  }
-  const isFavorite = s.favorites.includes(id);
+  
+  // Переключаем избранное в БД
+  const added = toggleFavorite(ctx.from.id, id);
+  await ctx.answerCallbackQuery({ text: added ? "Добавлено в избранное" : "Удалено из избранного" });
+  
+  const isFav = isFavorite(ctx.from.id, id);
   const kb = new InlineKeyboard()
-    .text(isFavorite ? "⭐ Убрать из избранного" : "⭐ В избранное", `fav_toggle_${id}`).row()
+    .text(isFav ? "⭐ Убрать из избранного" : "⭐ В избранное", `fav_toggle_${id}`).row()
     .text("⬅️ К вопросам раздела", `cat_${item.categoryId}`).row()
     .text("🏠 Главное меню", "start");
-  await ctx.editMessageText(formatFaqAnswer(item), { reply_markup: kb, parse_mode: "HTML" });
+
+  const text = formatFaqAnswer(item);
+  const hasPhoto = !!ctx.callbackQuery.message.photo;
+
+  if (hasPhoto) {
+    await ctx.editMessageCaption({
+      caption: text,
+      reply_markup: kb,
+      parse_mode: "HTML",
+    }).catch(async () => {
+      await ctx.editMessageText(text, { reply_markup: kb, parse_mode: "HTML" });
+    });
+  } else {
+    await ctx.editMessageText(text, { reply_markup: kb, parse_mode: "HTML" });
+  }
 });
 
 bot.callbackQuery("favorites", async (ctx) => {
-  const s = ctx.session;
-  const ids = Array.isArray(s.favorites) ? s.favorites : [];
-  if (!ids.length) {
+  const items = getFavorites(ctx.from.id);
+  if (!items.length) {
     const kb = new InlineKeyboard()
       .text("📚 Вопросы по категориям", "categories").row()
       .text("🔎 Поиск по вопросу", "search").row()
@@ -471,13 +490,9 @@ bot.callbackQuery("favorites", async (ctx) => {
     return;
   }
   const kb = new InlineKeyboard();
-  for (const id of ids.slice(0, 10)) {
-    const item = faqQuestionsMap.get(id);
-    if (!item) {
-      continue;
-    }
+  for (const item of items.slice(0, 10)) {
     const shortTitle = item.question.length > 40 ? item.question.slice(0, 37) + "..." : item.question;
-    const icon = getCategoryIcon(item.categoryId);
+    const icon = getCategoryIcon(item.category_id);
     const label = `${icon} ${shortTitle}`;
     kb.text(label, `faq_${item.id}`).row();
   }
@@ -515,7 +530,9 @@ bot.callbackQuery("profile", async (ctx) => {
   const s = ctx.session;
   const totalViewed = s.totalQuestionsViewed || 0;
   const searches = s.totalSearches || 0;
-  const favoritesCount = Array.isArray(s.favorites) ? s.favorites.length : 0;
+  const favorites = getFavorites(ctx.from.id);
+  const favoritesCount = favorites.length;
+  
   const text = [
     "👤 Профиль пользователя",
     "",
@@ -533,6 +550,7 @@ bot.callbackQuery("profile", async (ctx) => {
 bot.on("message:text", async (ctx) => {
   const text = (ctx.message.text || "").trim();
   if (!text) return;
+  
   const awaiting = ctx.session.awaitingSearch;
   ctx.session.awaitingSearch = false;
   ctx.session.lastSearchQuery = text;
@@ -564,7 +582,10 @@ bot.on("message:text", async (ctx) => {
   }
   ctx.session.totalSearches = (ctx.session.totalSearches || 0) + 1;
   const best = results[0].item;
-  incrementStat(best.id);
+  
+  // Обновляем статистику в БД
+  incrementQuestionStat(best.id);
+  
   const s = ctx.session;
   s.totalQuestionsViewed += 1;
   if (!s.recentQuestions.includes(best.id)) {

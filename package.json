@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "algoliasearch": "^4.24.0",
+    "better-sqlite3": "^12.6.2",
     "dotenv": "^16.4.5",
     "grammy": "^1.22.1"
   },
