@@ -8,12 +8,18 @@ import { faqCategories } from "./faqData.js";
 import { 
   initDb, 
   migrateFaqData, 
-  saveUser, 
+  saveUser,
+  getUserInfo,
   toggleFavorite, 
   getFavorites, 
   isFavorite, 
   incrementQuestionStat, 
-  getTopQuestions as getTopQuestionsDb 
+  getTopQuestions as getTopQuestionsDb,
+  addRecentQuestion,
+  getRecentQuestions,
+  clearRecentQuestions,
+  logSearch,
+  getUserSearchCount,
 } from "./database.js";
 
 if (!config.token) {
@@ -39,6 +45,64 @@ function indexFaq() {
 }
 
 indexFaq();
+
+// --- Встроенный fuzzy-поиск (без внешних сервисов) ---
+function normalize(str) {
+  return str
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[^а-яa-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenize(str) {
+  return normalize(str).split(" ").filter(Boolean);
+}
+
+function fuzzyMatch(needle, haystack) {
+  if (haystack.includes(needle)) return true;
+  // Префиксное совпадение: учитываем опечатки в окончаниях слов
+  for (let len = needle.length; len >= 3; len--) {
+    if (haystack.includes(needle.slice(0, len))) return true;
+  }
+  return false;
+}
+
+function searchFaqLocal(query, limit = 5) {
+  const queryTokens = tokenize(query).filter(t => t.length >= 2);
+  if (!queryTokens.length) return [];
+
+  const results = [];
+  for (const item of faqQuestionsMap.values()) {
+    const questionText = normalize(item.question);
+    const answerText = normalize(item.answer);
+    const kwText = normalize((item.keywords || []).join(" "));
+    const fullText = [questionText, answerText, kwText].join(" ");
+
+    let score = 0;
+    let matchedTokens = 0;
+
+    for (const token of queryTokens) {
+      if (!fuzzyMatch(token, fullText)) continue;
+      matchedTokens++;
+      if (fuzzyMatch(token, questionText)) score += 4; // вопрос важнее
+      if (fuzzyMatch(token, kwText)) score += 2;       // ключевые слова
+      score += 1;                                       // просто в тексте
+    }
+
+    if (matchedTokens === 0) continue;
+    // Штраф за неполное покрытие запроса
+    score *= (matchedTokens / queryTokens.length);
+    results.push({ item, score });
+  }
+
+  return results
+    .filter(r => r.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
 
 async function indexAlgolia() {
   if (!config.algoliaAppId || !config.algoliaApiKey || !config.algoliaIndexName) {
@@ -401,14 +465,8 @@ bot.callbackQuery(/^faq_\d+$/, async (ctx) => {
   // Обновляем статистику в БД
   incrementQuestionStat(id);
   
-  const s = ctx.session;
-  s.totalQuestionsViewed += 1;
-  if (!s.recentQuestions.includes(id)) {
-    s.recentQuestions.unshift(id);
-    if (s.recentQuestions.length > 10) {
-      s.recentQuestions = s.recentQuestions.slice(0, 10);
-    }
-  }
+  ctx.session.totalQuestionsViewed = (ctx.session.totalQuestionsViewed || 0) + 1;
+  addRecentQuestion(ctx.from.id, id);
   
   // Проверяем избранное в БД
   const isFav = isFavorite(ctx.from.id, id);
@@ -501,9 +559,8 @@ bot.callbackQuery("favorites", async (ctx) => {
 });
 
 bot.callbackQuery("recent", async (ctx) => {
-  const s = ctx.session;
-  const ids = Array.isArray(s.recentQuestions) ? s.recentQuestions : [];
-  if (!ids.length) {
+  const items = getRecentQuestions(ctx.from.id, 10);
+  if (!items.length) {
     const kb = new InlineKeyboard()
       .text("📚 Вопросы по категориям", "categories").row()
       .text("🔎 Поиск по вопросу", "search").row()
@@ -512,60 +569,84 @@ bot.callbackQuery("recent", async (ctx) => {
     return;
   }
   const kb = new InlineKeyboard();
-  for (const id of ids.slice(0, 10)) {
-    const item = faqQuestionsMap.get(id);
-    if (!item) {
-      continue;
-    }
+  for (const item of items) {
+    const mapItem = faqQuestionsMap.get(item.id);
+    if (!mapItem) continue;
     const shortTitle = item.question.length > 40 ? item.question.slice(0, 37) + "..." : item.question;
-    const icon = getCategoryIcon(item.categoryId);
+    const icon = getCategoryIcon(item.category_id);
     const label = `${icon} ${shortTitle}`;
     kb.text(label, `faq_${item.id}`).row();
   }
+  kb.text("🗑 Очистить историю", "clear_recent").row();
   kb.text("🏠 Главное меню", "start");
   await sendMenuPhoto(ctx, "recent", "🕒 Недавние вопросы, которые вы просматривали:", kb);
 });
 
 bot.callbackQuery("profile", async (ctx) => {
-  const s = ctx.session;
-  const totalViewed = s.totalQuestionsViewed || 0;
-  const searches = s.totalSearches || 0;
-  const favorites = getFavorites(ctx.from.id);
-  const favoritesCount = favorites.length;
-  
+  const userId = ctx.from.id;
+  const userInfo = getUserInfo(userId);
+  const favorites = getFavorites(userId);
+  const searches = getUserSearchCount(userId);
+  const recentItems = getRecentQuestions(userId, 5);
+
+  // Дата регистрации
+  let regDate = "—";
+  if (userInfo?.registered_at) {
+    const d = new Date(userInfo.registered_at);
+    regDate = d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" });
+  }
+
   const text = [
-    "👤 Профиль пользователя",
+    `👤 <b>Профиль пользователя</b>`,
+    `Имя: <b>${ctx.from.first_name || "—"}</b>`,
+    userInfo?.username ? `Username: @${userInfo.username}` : "",
+    `📅 В боте с: <b>${regDate}</b>`,
     "",
-    `📖 Просмотрено ответов: <b>${totalViewed}</b>`,
     `🔎 Поисковых запросов: <b>${searches}</b>`,
-    `⭐ В избранном вопросов: <b>${favoritesCount}</b>`,
-  ].join("\n");
+    `⭐ В избранном: <b>${favorites.length}</b>`,
+    `🕒 Недавно просмотрено: <b>${recentItems.length}</b>`,
+  ].filter(Boolean).join("\n");
+
   const kb = new InlineKeyboard()
     .text("⭐ Избранное", "favorites").row()
+    .text("🕒 Недавние вопросы", "recent").row()
+    .text("🗑 Очистить историю", "clear_recent").row()
     .text("📊 Популярные вопросы", "stats").row()
     .text("🏠 Главное меню", "start");
   await sendMenuPhoto(ctx, "profile", text, kb);
 });
 
+bot.callbackQuery("clear_recent", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "История очищена" });
+  clearRecentQuestions(ctx.from.id);
+  const kb = new InlineKeyboard()
+    .text("👤 Профиль", "profile").row()
+    .text("🏠 Главное меню", "start");
+  await ctx.editMessageText("🗑 История просмотров очищена.", { reply_markup: kb }).catch(async () => {
+    await ctx.reply("🗑 История просмотров очищена.", { reply_markup: kb });
+  });
+});
+
 bot.on("message:text", async (ctx) => {
   const text = (ctx.message.text || "").trim();
   if (!text) return;
-  
+
   const awaiting = ctx.session.awaitingSearch;
   ctx.session.awaitingSearch = false;
   ctx.session.lastSearchQuery = text;
-  if (!config.algoliaAppId || !config.algoliaApiKey || !config.algoliaIndexName) {
-    const kb = new InlineKeyboard()
-      .text("📚 По категориям", "categories").row()
-      .text("🔎 Поиск по вопросу", "search").row()
-      .text("🏠 Главное меню", "start");
-    await ctx.reply(
-      "Поиск по вопросам через Algolia пока не настроен. Обратитесь к администратору или используйте навигацию по категориям.",
-      { reply_markup: kb },
-    );
-    return;
+
+  // Сначала пробуем Algolia если настроена, иначе — встроенный fuzzy-поиск
+  let results = [];
+  if (config.algoliaAppId && config.algoliaApiKey && config.algoliaIndexName) {
+    results = await searchAlgoliaFaq(text, 5);
   }
-  const results = await searchAlgoliaFaq(text, 5);
+  if (!results.length) {
+    results = searchFaqLocal(text, 5);
+  }
+
+  // Логируем поиск в БД
+  logSearch(ctx.from.id, text, results.length);
+
   const treatAsSearch = awaiting || results.length > 0;
   if (!results.length || !treatAsSearch) {
     const kb = new InlineKeyboard()
@@ -573,27 +654,17 @@ bot.on("message:text", async (ctx) => {
       .text("🔎 Поиск по вопросу", "search").row()
       .text("🏠 Главное меню", "start");
     await ctx.reply(
-      "Я могу помочь с типовыми вопросами. Выберите действие в меню или нажмите «Поиск по вопросу».",
-      {
-        reply_markup: kb,
-      },
+      "По вашему запросу ничего не найдено. Попробуйте другие слова или воспользуйтесь навигацией по категориям.",
+      { reply_markup: kb },
     );
     return;
   }
-  ctx.session.totalSearches = (ctx.session.totalSearches || 0) + 1;
+
   const best = results[0].item;
-  
-  // Обновляем статистику в БД
   incrementQuestionStat(best.id);
-  
-  const s = ctx.session;
-  s.totalQuestionsViewed += 1;
-  if (!s.recentQuestions.includes(best.id)) {
-    s.recentQuestions.unshift(best.id);
-    if (s.recentQuestions.length > 10) {
-      s.recentQuestions = s.recentQuestions.slice(0, 10);
-    }
-  }
+  addRecentQuestion(ctx.from.id, best.id);
+  ctx.session.totalQuestionsViewed = (ctx.session.totalQuestionsViewed || 0) + 1;
+
   const alternatives = results.slice(1, 4).map((r) => r.item);
   const kb = new InlineKeyboard();
   for (const alt of alternatives) {
@@ -609,6 +680,21 @@ bot.on("message:text", async (ctx) => {
 bot.catch((err) => {
   console.error("Ошибка бота:", err);
 });
+
+// Graceful shutdown
+async function shutdown(signal) {
+  console.log(`Получен сигнал ${signal}, завершаем работу бота...`);
+  try {
+    await bot.stop();
+    console.log("Бот остановлен.");
+  } catch (e) {
+    console.error("Ошибка при остановке бота:", e);
+  }
+  process.exit(0);
+}
+
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 bot.start();
 console.log("FAQ-бот запущен");
