@@ -91,9 +91,7 @@ export function migrateFaqData(faqCategories) {
 }
 
 export function saveUser(telegramId, username, firstName) {
-  // INSERT OR IGNORE сохраняет registered_at при первом входе
   db.prepare(`INSERT OR IGNORE INTO users (telegram_id, username, first_name) VALUES (?, ?, ?)`).run(telegramId, username, firstName);
-  // Обновляем только изменяемые поля
   db.prepare(`UPDATE users SET username = ?, first_name = ?, last_viewed_at = CURRENT_TIMESTAMP WHERE telegram_id = ?`).run(username, firstName, telegramId);
 }
 

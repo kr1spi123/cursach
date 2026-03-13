@@ -5,15 +5,15 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { config } from "./config.js";
 import { faqCategories } from "./faqData.js";
-import { 
-  initDb, 
-  migrateFaqData, 
+import {
+  initDb,
+  migrateFaqData,
   saveUser,
   getUserInfo,
-  toggleFavorite, 
-  getFavorites, 
-  isFavorite, 
-  incrementQuestionStat, 
+  toggleFavorite,
+  getFavorites,
+  isFavorite,
+  incrementQuestionStat,
   getTopQuestions as getTopQuestionsDb,
   addRecentQuestion,
   getRecentQuestions,
@@ -70,7 +70,7 @@ function fuzzyMatch(needle, haystack) {
 }
 
 function searchFaqLocal(query, limit = 5) {
-  const queryTokens = tokenize(query).filter(t => t.length >= 2);
+  const queryTokens = tokenize(query).filter((t) => t.length >= 2);
   if (!queryTokens.length) return [];
 
   const results = [];
@@ -87,25 +87,28 @@ function searchFaqLocal(query, limit = 5) {
       if (!fuzzyMatch(token, fullText)) continue;
       matchedTokens++;
       if (fuzzyMatch(token, questionText)) score += 4; // вопрос важнее
-      if (fuzzyMatch(token, kwText)) score += 2;       // ключевые слова
-      score += 1;                                       // просто в тексте
+      if (fuzzyMatch(token, kwText)) score += 2; // ключевые слова
+      score += 1; // просто в тексте
     }
 
     if (matchedTokens === 0) continue;
     // Штраф за неполное покрытие запроса
-    score *= (matchedTokens / queryTokens.length);
+    score *= matchedTokens / queryTokens.length;
     results.push({ item, score });
   }
 
   return results
-    .filter(r => r.score > 0)
+    .filter((r) => r.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 }
 
-
 async function indexAlgolia() {
-  if (!config.algoliaAppId || !config.algoliaApiKey || !config.algoliaIndexName) {
+  if (
+    !config.algoliaAppId ||
+    !config.algoliaApiKey ||
+    !config.algoliaIndexName
+  ) {
     return;
   }
   try {
@@ -229,8 +232,24 @@ function findImageByKeywords(keywords) {
 
 async function sendMenuPhoto(ctx, sectionKey, caption, kb) {
   const sectionKeywords = {
-    home: ["main menu", "home", "main", "start", "banner", "главное", "старт", "баннер"],
-    categories: ["select question", "categories", "категории", "вопросы", "menu", "list"],
+    home: [
+      "main menu",
+      "home",
+      "main",
+      "start",
+      "banner",
+      "главное",
+      "старт",
+      "баннер",
+    ],
+    categories: [
+      "select question",
+      "categories",
+      "категории",
+      "вопросы",
+      "menu",
+      "list",
+    ],
     search: ["search", "find", "поиск", "вопрос"],
     stats: ["stats", "chart", "statistics", "статистика"],
     help: ["help", "faq", "question", "помощь", "вопрос"],
@@ -241,23 +260,19 @@ async function sendMenuPhoto(ctx, sectionKey, caption, kb) {
     commands: ["commands", "команды", "help", "faq"],
   };
   const p = findImageByKeywords(sectionKeywords[sectionKey] || []);
+  // Фабрика: создаём новый InputFile при каждом вызове — ReadStream нельзя использовать дважды
+  const makeFile = () => new InputFile(fs.createReadStream(p));
   const hasCallback = !!ctx.callbackQuery;
   if (hasCallback) {
     await ctx.answerCallbackQuery().catch(() => {});
     if (p) {
-      const file = new InputFile(fs.createReadStream(p));
       await ctx
         .editMessageMedia(
-          {
-            type: "photo",
-            media: file,
-            caption,
-            parse_mode: "HTML",
-          },
+          { type: "photo", media: makeFile(), caption, parse_mode: "HTML" },
           { reply_markup: kb },
         )
         .catch(async () => {
-          await ctx.replyWithPhoto(file, {
+          await ctx.replyWithPhoto(makeFile(), {
             caption,
             reply_markup: kb,
             parse_mode: "HTML",
@@ -272,8 +287,11 @@ async function sendMenuPhoto(ctx, sectionKey, caption, kb) {
     }
   } else {
     if (p) {
-      const file = new InputFile(fs.createReadStream(p));
-      await ctx.replyWithPhoto(file, { caption, reply_markup: kb, parse_mode: "HTML" });
+      await ctx.replyWithPhoto(makeFile(), {
+        caption,
+        reply_markup: kb,
+        parse_mode: "HTML",
+      });
     } else {
       await ctx.reply(caption, { reply_markup: kb, parse_mode: "HTML" });
     }
@@ -282,12 +300,17 @@ async function sendMenuPhoto(ctx, sectionKey, caption, kb) {
 
 function startKeyboard() {
   const kb = new InlineKeyboard()
-    .text("📚 Вопросы по категориям", "categories").row()
-    .text("🔎 Поиск по вопросу", "search").row()
-    .text("📊 Популярные вопросы", "stats").row()
+    .text("📚 Вопросы по категориям", "categories")
+    .row()
+    .text("🔎 Поиск по вопросу", "search")
+    .row()
+    .text("📊 Популярные вопросы", "stats")
+    .row()
     .text("⭐ Избранное", "favorites")
-    .text("🕒 Недавние", "recent").row()
-    .text("👤 Профиль", "profile").row()
+    .text("🕒 Недавние", "recent")
+    .row()
+    .text("👤 Профиль", "profile")
+    .row()
     .text("❓ Помощь", "help")
     .text("ℹ️ О боте", "about");
   return kb;
@@ -340,11 +363,16 @@ function questionsKeyboard(categoryId) {
   }
   const icon = getCategoryIcon(categoryId);
   for (const item of category.items) {
-    const shortTitle = item.question.length > 40 ? item.question.slice(0, 37) + "..." : item.question;
+    const shortTitle =
+      item.question.length > 40
+        ? item.question.slice(0, 37) + "..."
+        : item.question;
     const label = `${icon} ${shortTitle}`;
     kb.text(label, `faq_${item.id}`).row();
   }
-  kb.text("⬅️ К категориям", "categories").row().text("🏠 Главное меню", "start");
+  kb.text("⬅️ К категориям", "categories")
+    .row()
+    .text("🏠 Главное меню", "start");
   return kb;
 }
 
@@ -461,19 +489,25 @@ bot.callbackQuery(/^faq_\d+$/, async (ctx) => {
     await ctx.reply("Вопрос не найден. Попробуйте снова.");
     return;
   }
-  
+
   // Обновляем статистику в БД
   incrementQuestionStat(id);
-  
-  ctx.session.totalQuestionsViewed = (ctx.session.totalQuestionsViewed || 0) + 1;
+
+  ctx.session.totalQuestionsViewed =
+    (ctx.session.totalQuestionsViewed || 0) + 1;
   addRecentQuestion(ctx.from.id, id);
-  
+
   // Проверяем избранное в БД
   const isFav = isFavorite(ctx.from.id, id);
-  
+
   const kb = new InlineKeyboard()
-    .text(isFav ? "⭐ Убрать из избранного" : "⭐ В избранное", `fav_toggle_${id}`).row()
-    .text("⬅️ К вопросам раздела", `cat_${item.categoryId}`).row()
+    .text(
+      isFav ? "⭐ Убрать из избранного" : "⭐ В избранное",
+      `fav_toggle_${id}`,
+    )
+    .row()
+    .text("⬅️ К вопросам раздела", `cat_${item.categoryId}`)
+    .row()
     .text("🏠 Главное меню", "start");
   await sendMenuPhoto(ctx, "categories", formatFaqAnswer(item), kb);
 });
@@ -491,14 +525,22 @@ bot.callbackQuery("stats", async (ctx) => {
   const top = getTopQuestionsDb(5);
   if (!top.length) {
     const kb = backHomeKeyboard();
-    await sendMenuPhoto(ctx, "stats", "Пока статистика пуста. Задайте несколько вопросов через бот.", kb);
+    await sendMenuPhoto(
+      ctx,
+      "stats",
+      "Пока статистика пуста. Задайте несколько вопросов через бот.",
+      kb,
+    );
     return;
   }
   const lines = ["📊 Популярные вопросы:"];
   for (const item of top) {
     lines.push(`• ${item.question} (запросов: ${item.view_count})`);
   }
-  const kb = new InlineKeyboard().text("📚 К категориям", "categories").row().text("🏠 Главное меню", "start");
+  const kb = new InlineKeyboard()
+    .text("📚 К категориям", "categories")
+    .row()
+    .text("🏠 Главное меню", "start");
   await sendMenuPhoto(ctx, "stats", lines.join("\n"), kb);
 });
 
@@ -510,28 +552,40 @@ bot.callbackQuery(/^fav_toggle_\d+$/, async (ctx) => {
     await ctx.reply("Не удалось обновить избранное. Попробуйте позже.");
     return;
   }
-  
+
   // Переключаем избранное в БД
   const added = toggleFavorite(ctx.from.id, id);
-  await ctx.answerCallbackQuery({ text: added ? "Добавлено в избранное" : "Удалено из избранного" });
-  
+  await ctx.answerCallbackQuery({
+    text: added ? "Добавлено в избранное" : "Удалено из избранного",
+  });
+
   const isFav = isFavorite(ctx.from.id, id);
   const kb = new InlineKeyboard()
-    .text(isFav ? "⭐ Убрать из избранного" : "⭐ В избранное", `fav_toggle_${id}`).row()
-    .text("⬅️ К вопросам раздела", `cat_${item.categoryId}`).row()
+    .text(
+      isFav ? "⭐ Убрать из избранного" : "⭐ В избранное",
+      `fav_toggle_${id}`,
+    )
+    .row()
+    .text("⬅️ К вопросам раздела", `cat_${item.categoryId}`)
+    .row()
     .text("🏠 Главное меню", "start");
 
   const text = formatFaqAnswer(item);
   const hasPhoto = !!ctx.callbackQuery.message.photo;
 
   if (hasPhoto) {
-    await ctx.editMessageCaption({
-      caption: text,
-      reply_markup: kb,
-      parse_mode: "HTML",
-    }).catch(async () => {
-      await ctx.editMessageText(text, { reply_markup: kb, parse_mode: "HTML" });
-    });
+    await ctx
+      .editMessageCaption({
+        caption: text,
+        reply_markup: kb,
+        parse_mode: "HTML",
+      })
+      .catch(async () => {
+        await ctx.editMessageText(text, {
+          reply_markup: kb,
+          parse_mode: "HTML",
+        });
+      });
   } else {
     await ctx.editMessageText(text, { reply_markup: kb, parse_mode: "HTML" });
   }
@@ -541,15 +595,25 @@ bot.callbackQuery("favorites", async (ctx) => {
   const items = getFavorites(ctx.from.id);
   if (!items.length) {
     const kb = new InlineKeyboard()
-      .text("📚 Вопросы по категориям", "categories").row()
-      .text("🔎 Поиск по вопросу", "search").row()
+      .text("📚 Вопросы по категориям", "categories")
+      .row()
+      .text("🔎 Поиск по вопросу", "search")
+      .row()
       .text("🏠 Главное меню", "start");
-    await sendMenuPhoto(ctx, "favorites", "У вас пока нет избранных вопросов. Добавьте любой ответ в избранное кнопкой «⭐».", kb);
+    await sendMenuPhoto(
+      ctx,
+      "favorites",
+      "У вас пока нет избранных вопросов. Добавьте любой ответ в избранное кнопкой «⭐».",
+      kb,
+    );
     return;
   }
   const kb = new InlineKeyboard();
   for (const item of items.slice(0, 10)) {
-    const shortTitle = item.question.length > 40 ? item.question.slice(0, 37) + "..." : item.question;
+    const shortTitle =
+      item.question.length > 40
+        ? item.question.slice(0, 37) + "..."
+        : item.question;
     const icon = getCategoryIcon(item.category_id);
     const label = `${icon} ${shortTitle}`;
     kb.text(label, `faq_${item.id}`).row();
@@ -562,24 +626,39 @@ bot.callbackQuery("recent", async (ctx) => {
   const items = getRecentQuestions(ctx.from.id, 10);
   if (!items.length) {
     const kb = new InlineKeyboard()
-      .text("📚 Вопросы по категориям", "categories").row()
-      .text("🔎 Поиск по вопросу", "search").row()
+      .text("📚 Вопросы по категориям", "categories")
+      .row()
+      .text("🔎 Поиск по вопросу", "search")
+      .row()
       .text("🏠 Главное меню", "start");
-    await sendMenuPhoto(ctx, "recent", "Вы ещё не просматривали ответы. Откройте любой вопрос через категории или поиск.", kb);
+    await sendMenuPhoto(
+      ctx,
+      "recent",
+      "Вы ещё не просматривали ответы. Откройте любой вопрос через категории или поиск.",
+      kb,
+    );
     return;
   }
   const kb = new InlineKeyboard();
   for (const item of items) {
     const mapItem = faqQuestionsMap.get(item.id);
     if (!mapItem) continue;
-    const shortTitle = item.question.length > 40 ? item.question.slice(0, 37) + "..." : item.question;
+    const shortTitle =
+      item.question.length > 40
+        ? item.question.slice(0, 37) + "..."
+        : item.question;
     const icon = getCategoryIcon(item.category_id);
     const label = `${icon} ${shortTitle}`;
     kb.text(label, `faq_${item.id}`).row();
   }
   kb.text("🗑 Очистить историю", "clear_recent").row();
   kb.text("🏠 Главное меню", "start");
-  await sendMenuPhoto(ctx, "recent", "🕒 Недавние вопросы, которые вы просматривали:", kb);
+  await sendMenuPhoto(
+    ctx,
+    "recent",
+    "🕒 Недавние вопросы, которые вы просматривали:",
+    kb,
+  );
 });
 
 bot.callbackQuery("profile", async (ctx) => {
@@ -593,7 +672,11 @@ bot.callbackQuery("profile", async (ctx) => {
   let regDate = "—";
   if (userInfo?.registered_at) {
     const d = new Date(userInfo.registered_at);
-    regDate = d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" });
+    regDate = d.toLocaleDateString("ru-RU", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    });
   }
 
   const text = [
@@ -605,13 +688,19 @@ bot.callbackQuery("profile", async (ctx) => {
     `🔎 Поисковых запросов: <b>${searches}</b>`,
     `⭐ В избранном: <b>${favorites.length}</b>`,
     `🕒 Недавно просмотрено: <b>${recentItems.length}</b>`,
-  ].filter(Boolean).join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   const kb = new InlineKeyboard()
-    .text("⭐ Избранное", "favorites").row()
-    .text("🕒 Недавние вопросы", "recent").row()
-    .text("🗑 Очистить историю", "clear_recent").row()
-    .text("📊 Популярные вопросы", "stats").row()
+    .text("⭐ Избранное", "favorites")
+    .row()
+    .text("🕒 Недавние вопросы", "recent")
+    .row()
+    .text("🗑 Очистить историю", "clear_recent")
+    .row()
+    .text("📊 Популярные вопросы", "stats")
+    .row()
     .text("🏠 Главное меню", "start");
   await sendMenuPhoto(ctx, "profile", text, kb);
 });
@@ -620,11 +709,14 @@ bot.callbackQuery("clear_recent", async (ctx) => {
   await ctx.answerCallbackQuery({ text: "История очищена" });
   clearRecentQuestions(ctx.from.id);
   const kb = new InlineKeyboard()
-    .text("👤 Профиль", "profile").row()
+    .text("👤 Профиль", "profile")
+    .row()
     .text("🏠 Главное меню", "start");
-  await ctx.editMessageText("🗑 История просмотров очищена.", { reply_markup: kb }).catch(async () => {
-    await ctx.reply("🗑 История просмотров очищена.", { reply_markup: kb });
-  });
+  await ctx
+    .editMessageText("🗑 История просмотров очищена.", { reply_markup: kb })
+    .catch(async () => {
+      await ctx.reply("🗑 История просмотров очищена.", { reply_markup: kb });
+    });
 });
 
 bot.on("message:text", async (ctx) => {
@@ -650,8 +742,10 @@ bot.on("message:text", async (ctx) => {
   const treatAsSearch = awaiting || results.length > 0;
   if (!results.length || !treatAsSearch) {
     const kb = new InlineKeyboard()
-      .text("📚 По категориям", "categories").row()
-      .text("🔎 Поиск по вопросу", "search").row()
+      .text("📚 По категориям", "categories")
+      .row()
+      .text("🔎 Поиск по вопросу", "search")
+      .row()
       .text("🏠 Главное меню", "start");
     await ctx.reply(
       "По вашему запросу ничего не найдено. Попробуйте другие слова или воспользуйтесь навигацией по категориям.",
@@ -663,18 +757,25 @@ bot.on("message:text", async (ctx) => {
   const best = results[0].item;
   incrementQuestionStat(best.id);
   addRecentQuestion(ctx.from.id, best.id);
-  ctx.session.totalQuestionsViewed = (ctx.session.totalQuestionsViewed || 0) + 1;
+  ctx.session.totalQuestionsViewed =
+    (ctx.session.totalQuestionsViewed || 0) + 1;
 
   const alternatives = results.slice(1, 4).map((r) => r.item);
   const kb = new InlineKeyboard();
   for (const alt of alternatives) {
-    const shortTitle = alt.question.length > 40 ? alt.question.slice(0, 37) + "..." : alt.question;
+    const shortTitle =
+      alt.question.length > 40
+        ? alt.question.slice(0, 37) + "..."
+        : alt.question;
     const icon = getCategoryIcon(alt.categoryId);
     const label = `${icon} ${shortTitle}`;
     kb.text(label, `faq_${alt.id}`).row();
   }
   kb.text("🏠 Главное меню", "start");
-  await ctx.reply(formatFaqAnswer(best), { reply_markup: kb, parse_mode: "HTML" });
+  await ctx.reply(formatFaqAnswer(best), {
+    reply_markup: kb,
+    parse_mode: "HTML",
+  });
 });
 
 bot.catch((err) => {
